@@ -1,3 +1,0 @@
-/home/boo/proj/tdc/build/CMakeFiles/rebuild_cache.dir
-/home/boo/proj/tdc/build/CMakeFiles/tdc.dir
-/home/boo/proj/tdc/build/CMakeFiles/edit_cache.dir

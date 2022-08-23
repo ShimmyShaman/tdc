@@ -30,3 +30,7 @@
 *.exe
 *.out
 *.app
+
+# App-Specific
+cap/
+build/

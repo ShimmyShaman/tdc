@@ -7,6 +7,8 @@
 #include <sys/ioctl.h>
 #include <time.h>
 #include <atomic>
+#include <dirent.h>
+#include <sys/stat.h>
 
 // #include "image_converter.h"
 #include <jetson-utils/gstCamera.h>
@@ -18,8 +20,12 @@
 #define GPIO_IR_SENSOR 12     /*79*/
 #define GPIO_LOWBATT 13       /*14*/
 
-const int video_width = 1920; // 640;  // video_options.width;
-const int video_height = 1080; // 480; // video_options.height;
+#define CAPTURE_BASE_DIR "/home/boo/proj/tdc/cap"
+
+const char *session_directory;
+
+const int video_width = 640;  // 1920; // video_options.width;
+const int video_height = 480; // 1080; // video_options.height;
 
 std::atomic_uint left_enc_register;
 std::atomic_uint right_enc_register;
@@ -155,11 +161,27 @@ float get_diff_secsf(struct timespec *time, struct timespec *from) {
 }
 
 int main(int argc, char *argv[]) {
-	// // # Start Recording Reminder #
-	// // ** Comment this if you have no clue what it is **
-	// int days_since_this_code_fragment_was_written = 0;
+  // Create session directory
 
+  char cap_dir_buffer[512];
 
+  {
+    int session_idx = 1;
+    struct stat sb;
+
+    for (;; ++session_idx) {
+      sprintf(cap_dir_buffer, "%s/s%i", CAPTURE_BASE_DIR, session_idx);
+      if (stat(cap_dir_buffer, &sb) != 0 || !S_ISDIR(sb.st_mode))
+        break;
+    }
+    session_directory = (const char *)&cap_dir_buffer;
+    if (mkdir(session_directory, 0777)) {
+      puts("Could not create directory for session captures, aborting");
+      return -10;
+    }
+
+    printf("Created directory '%s' for session captures", session_directory);
+  }
 
   // GPIOs
   GPIO::setmode(GPIO::BOARD);
@@ -184,6 +206,7 @@ int main(int argc, char *argv[]) {
   const float FramePeriod = 2.25f;
 
   int frame_index = 0, iter = 0;
+  char buf[512];
   while (true) {
     if(kbhit() && getch() == 'q')
       break;
@@ -198,16 +221,28 @@ int main(int argc, char *argv[]) {
     // Next Frame
       // if (r % 10 == 0)
       //   puts(".");
-    printf("frame %i (%.2fs)\n", frame_index, get_diff_secsf(&r, &loop_begin));
+    float elapsed_secs = get_diff_secsf(&r, &loop_begin);
+    printf("frame %i (%.2fs)\n", frame_index, elapsed_secs);
 
     uint lenc = left_enc_register.exchange(0);
     uint renc = right_enc_register.exchange(0);
     bool irdetect = !GPIO::input(GPIO_IR_SENSOR);
     bool lbsignal = !GPIO::input(GPIO_LOWBATT);
 
-    std::string session_dir = std::string("/home/boo/proj/tdc/cap/1/");
-    std::string capture_path = session_dir + std::string("capture_") + std::to_string(frame_index) + std::string(".jpg");
+    // Capture the image and save to file
+    std::string capture_path = session_directory + std::string("/f") + std::to_string(frame_index) + std::string(".jpg");
     captureImage(pCamera, capture_path);
+
+    // Save the sensor info
+    sprintf(buf, "%s/d%i.txt", session_directory, frame_index);
+    FILE *fp = fopen(buf, "w");
+    if (fp != NULL) {
+      fprintf(fp, "frame_index:%i\nsession_time_secs:%f\nleft:%u\nright:%u\nirs:%i\nlbs:%i\n", frame_index, elapsed_secs,
+        lenc, renc, irdetect ? 1 : 0, lbsignal ? 1 : 0);
+      fclose(fp);
+    } else {
+      printf("Error opening file '%s': %d (%s)\n", buf, errno, strerror(errno));
+    }
 
 	  clock_gettime(CLOCK_REALTIME, &t);
     since = get_diff_secsf(&t, &r);
@@ -215,6 +250,10 @@ int main(int argc, char *argv[]) {
     printf("-- L:%u R:%u IR:%s LB:%s\n (%.2fs)\n", lenc, renc, irdetect ? "detect" : "none", lbsignal ? "ok" : "low",
       since);
     ++frame_index;
+
+    if (elapsed_secs > 15.f) {
+      break;
+    }
   }
 
   GPIO::cleanup(GPIO_LENC);
