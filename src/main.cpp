@@ -12,8 +12,11 @@
 
 // #include "image_converter.h"
 #include <jetson-utils/gstCamera.h>
+#include <jetson-utils/videoOptions.h>
 #include <JetsonGPIO.h>
+
 #include <opencv2/opencv.hpp>
+#include <opencv2/core/types.hpp>
 
 #define GPIO_LENC 7           /*216*/
 #define GPIO_RENC 11          /*50*/
@@ -24,11 +27,13 @@
 
 const char *session_directory;
 
-const int video_width = 640;  // 1920; // video_options.width;
+const int video_width = 640; // 1920; // video_options.width;
 const int video_height = 480; // 1080; // video_options.height;
 
 std::atomic_uint left_enc_register;
 std::atomic_uint right_enc_register;
+
+videoOptions vo;
 
 int kbhit() {
     static const int STDIN = 0;
@@ -73,21 +78,26 @@ char getch(void) {
 
 bool createAndOpenCamera(gstCamera **pCamera) {
   
-  std::string resource_str = "csi://0";
-  std::string codec_str = "";
+  vo.resource = "csi://0";
+  vo.width = video_width;
+  vo.height = video_height;
+  // vo.frameRate = 30;
+  // vo.bitRate = 4Mbps
+  vo.numBuffers = 4;
+  vo.zeroCopy = true;
+  vo.loop = 0;
+  vo.rtspLatency = 2000;
+  vo.deviceType = videoOptions::DeviceType::DEVICE_CSI;
+  vo.ioType = videoOptions::IoType::INPUT;
+  vo.flipMethod = videoOptions::FlipMethod::FLIP_NONE;
+  vo.codec = videoOptions::Codec::CODEC_MJPEG;
 
-  if (resource_str.size() == 0) {
-    puts("[tbs] resource param wasn't set - please set the node's resource parameter to the input device"
-      "/filename/URL");
-    return false;
-  }
-
-  printf("[tbs] opening video source: %s", resource_str.c_str());
+  printf("[tbs] opening video source: %s", (const char *)vo.resource);
 
   /*
    * open video source
    */
-  gstCamera *camera = gstCamera::Create(video_width, video_height);
+  gstCamera *camera = gstCamera::Create(vo);
 
   if (!camera) {
     puts("[tbs] failed to open video source");
@@ -112,7 +122,7 @@ bool createAndOpenCamera(gstCamera **pCamera) {
 
 bool captureImage(gstCamera *camera, std::string filename/*, imageConverter *image_cvt/*, sensor_msgs::Image *img*/) {
   uchar3 *capture = NULL;
-  if (!camera->Capture(&capture, 2000)) {
+  if (!camera->Capture(&capture, 1000)) {
     puts("\n[tbs] Failed to capture image");
     return false;
   }
@@ -120,11 +130,20 @@ bool captureImage(gstCamera *camera, std::string filename/*, imageConverter *ima
   // puts("\n[tbs] Image Captured!");
   // printf("[tbs] %zu\n", sizeof(capture));
 
-  cv::Mat img = cv::Mat(cv::Size(video_width, video_height), CV_8UC3, capture);
-  // cv::cvtColor(img, img, cv::ColorConversionCodes::COLOR_BGR2GRAY);
-  
+  cv::Mat img = cv::Mat(cv::Size(video_width, video_height), CV_8UC3, capture).clone();
+  cv::cvtColor(img, img, cv::ColorConversionCodes::COLOR_BGR2RGB);
+  // cv::imwrite(filename + std::string(".png"), img);
 
-  cv::imwrite(filename, img);
+  cv::Mat sca;
+  cv::Rect crop_a(0, 0, 300, 300);
+  cv::Rect crop_b(220, 0, 300, 300);
+  
+  cv::resize(img, sca, cv::Size(520, 300));
+  cv::Mat left = sca(crop_a);
+  cv::Mat right = sca(crop_b);
+
+  cv::imwrite(filename + std::string("a.png"), left);
+  cv::imwrite(filename + std::string("b.png"), right);
 
 
   // // Convert the image to ROS output
@@ -154,6 +173,10 @@ void sensor_signal_callback(const std::string& channel) {
       ++right_enc_register;
       break;
   }
+}
+
+void log(char *str) {
+  puts(str);
 }
 
 float get_diff_secsf(struct timespec *time, struct timespec *from) {
@@ -203,17 +226,17 @@ int main(int argc, char *argv[]) {
 	clock_gettime(CLOCK_REALTIME, &loop_begin);
   r = loop_begin;
 
-  const float FramePeriod = 2.25f;
+  const float FramePeriod = 0.20f;
 
   int frame_index = 0, iter = 0;
   char buf[512];
   while (true) {
-    if(kbhit() && getch() == 'q')
-      break;
+    // if(kbhit() && getch() == 'q')
+    //   break;
 	  clock_gettime(CLOCK_REALTIME, &t);
     float since = get_diff_secsf(&t, &r);
     if (since < FramePeriod) {
-      usleep(1000);
+      usleep(500);
       continue;
     }
     r = t;
@@ -222,7 +245,7 @@ int main(int argc, char *argv[]) {
       // if (r % 10 == 0)
       //   puts(".");
     float elapsed_secs = get_diff_secsf(&r, &loop_begin);
-    printf("frame %i (%.2fs)\n", frame_index, elapsed_secs);
+    // printf("frame %i (%.2fs)\n", frame_index, elapsed_secs);
 
     uint lenc = left_enc_register.exchange(0);
     uint renc = right_enc_register.exchange(0);
@@ -230,7 +253,7 @@ int main(int argc, char *argv[]) {
     bool lbsignal = !GPIO::input(GPIO_LOWBATT);
 
     // Capture the image and save to file
-    std::string capture_path = session_directory + std::string("/f") + std::to_string(frame_index) + std::string(".jpg");
+    std::string capture_path = session_directory + std::string("/f") + std::to_string(frame_index);
     captureImage(pCamera, capture_path);
 
     // Save the sensor info
@@ -247,11 +270,11 @@ int main(int argc, char *argv[]) {
 	  clock_gettime(CLOCK_REALTIME, &t);
     since = get_diff_secsf(&t, &r);
 
-    printf("-- L:%u R:%u IR:%s LB:%s\n (%.2fs)\n", lenc, renc, irdetect ? "detect" : "none", lbsignal ? "ok" : "low",
-      since);
+    printf("-- %i L:%u R:%u IR:%s LB:%s\n (%ims)\n", frame_index, lenc, renc, irdetect ? "detect" : "none", lbsignal ? "ok" : "low",
+      (int)(since * 1000.f));
     ++frame_index;
 
-    if (elapsed_secs > 15.f) {
+    if (elapsed_secs > 116.f) {
       break;
     }
   }
@@ -264,5 +287,9 @@ int main(int argc, char *argv[]) {
 
   closeCamera(pCamera);
   
+  puts("Successfully exited!");
+  
+  system("shutdown -P now");
+
 	return 0;
 }
